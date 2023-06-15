@@ -1,19 +1,15 @@
 #!/usr/bin/env sh
 
-
 minikube start --force
 
-pwd
-ls
 echo "======================= Running helm ==========================="
-wget https://get.helm.sh/helm-v3.9.2-linux-amd64.tar.gz
-tar -zxvf helm-v3.9.2-linux-amd64.tar.gz
-cp linux-amd64/helm /usr/local/bin
+# wget https://get.helm.sh/helm-v3.9.2-linux-amd64.tar.gz
+# tar -zxvf helm-v3.9.2-linux-amd64.tar.gz
+# cp linux-amd64/helm /usr/local/bin
 date
 helm install --wait my-demo-chart demo-chart/ --values demo-chart/values.yaml
 date
 
-echo "waiting 30 seconds for nginx to come up properly.."
 echo "==================="
 echo "Nodes:"
 kubectl get nodes
@@ -22,6 +18,8 @@ kubectl get pods
 echo "Services:"
 kubectl get services
 echo "==================="
+
+
 #export NODE_PORT=$(kubectl get --namespace default -o jsonpath="{.spec.ports[0].nodePort}" services my-demo-chart)
 #export NODE_IP=$(kubectl get nodes --namespace default -o jsonpath="{.items[0].status.addresses[0].address}")
 #echo http://$NODE_IP:$NODE_PORT
@@ -40,5 +38,4 @@ then
 else
 	echo "NGINX Connection unsuccesful."
 fi
-
 exit $ret
