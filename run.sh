@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/bash
 
 export NAMESPACE=default
 export ENABLE_AWS=1
@@ -7,15 +7,17 @@ export AWS_REGION=
 export AWS_ACCESS_KEY_ID=
 export AWS_SECRET_ACCESS_KEY=
 export AWS_ECR_SECRET_PREFIX=regcred
-export K8S_PROXY_PORT=16182
+export K8S_PROXY_PORT=16181
 export CLUSTER_MOUNTS= #(<src folder 1>:<dst folder1>,...) /opt/mongodb/data:/mongodb/data
+export CLUSTER_PORT_FORWARDS="app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart:16190 app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart:16191"
 export KIND_WORKERS=0
 
 
+# my-demo-chart demo-chart/ --values demo-chart/values.yaml
 export K8S_ENC_FILES=
-export K8S_VAR_FILES=
-export K8S_CHART_NAME=
-export K8S_CHART_REFERENCE=
+export K8S_VAR_FILES=demo-chart/values.yaml
+export K8S_CHART_NAME=my-demo-chart
+export K8S_CHART_REFERENCE=./demo-chart/
 
 all_cmounts=()
 KIND_EXE="/root/go/bin/kind"
@@ -30,8 +32,29 @@ print_title() {
         print_sep
 }
 
+install_monit() {
+	print_title "Installing monit"
+	sudo apt-get update -y
+	sudo apt install -y monit
+	cat <<EOF > /etc/monit/conf.d/custom.settings
+set daemon 5
+set httpd port 2812 and
+  allow localhost
+  allow admin:monit
+EOF
+}
+
+start_monit() {
+	print_title "Starting monit"
+	monit -t
+	echo Status:
+	monit
+	monit status
+}
+
 setup_minikube_cluster_mounts() {
 	if [ "${CLUSTER_MOUNTS}" == "" ]; then
+		echo "No cluster mounts specified"
 		return
 	fi
         for cmount in `echo ${CLUSTER_MOUNTS} | tr "," " "`; do
@@ -49,7 +72,7 @@ setup_minikube_cluster_mounts() {
 
 start_minikube() {
 	print_title "Normalizing persistent mounts."
-	mount_string=setup_minikube_cluster_mounts()
+	mount_string=setup_minikube_cluster_mounts
         print_title "Starting minikube"
         minikube start --force ${mount_string}
 }
@@ -91,7 +114,7 @@ setup_aws_credentials() {
         print_title "Setting up aws credentials file from environment"
 
         if [ "$AWS_ACCESS_KEY_ID" == "" -o "$AWS_SECRET_ACCESS_KEY" == "" ]; then
-                echo "Could not fine aws credentials in environment."
+                echo "Could not find aws credentials in environment."
                 return
         fi
         mkdir -p ~/.aws
@@ -136,6 +159,8 @@ install_chart() {
                 --set global.namespace="$NAMESPACE" \
 		${helm_file_args} \
                 ${K8S_CHART_NAME} ${K8S_CHART_REFERENCE}
+	sleep 10
+	kubectl get pods
 }
 
 setup_cluster_access_proxy() {
@@ -144,39 +169,64 @@ setup_cluster_access_proxy() {
 }
 
 setup_port_frowards() {
-        for cmount in `echo ${CLUSTER_PORT_FORWARDS} | tr "," " "`; do
-                srcDir=`echo ${cmount} | cut -d ":" -f 1`
-                echo "minikube mount ${cmount}"
-                rm -f ${srcDir}
-                mkdir -p ${srcDir}
-                minikube mount ${cmount} --uid 999 --gid 999 &
-                pid=$!
-                all_cmounts+=( $pid )
-        done
-        sleep 10
-        print_title "Cluster mount pids: " ${all_cmounts}
         print_title "Setting up required port forwards."
-	export POD_NAME=$(kubectl get pods --namespace default -l "app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart" -o jsonpath="{.items[0].metadata.name}")
-	export CONTAINER_PORT=$(kubectl get pod --namespace default $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
-	kubectl --namespace default port-forward --address 0.0.0.0  $POD_NAME 8080:$CONTAINER_PORT
+	i=0
+        for cmount in ${CLUSTER_PORT_FORWARDS}; do
+                appLabel=`echo ${cmount} | cut -d ":" -f 1`
+		targetPort=`echo ${cmount} | cut -d ":" -f 2`
+
+		POD_NAME=$(kubectl get pods --namespace ${NAMESPACE} -l "${appLabel}" -o jsonpath="{.items[0].metadata.name}")
+		CONTAINER_PORT=$(kubectl get pod --namespace ${NAMESPACE} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+
+		echo "Mapping: ${appLabel} pod: ${POD_NAME} container_port: ${CONTAINER_PORT} hostport: ${targetPort}"
+		if [ "$i" == "0" ]; then
+			echo "Starting new tmux session"
+			/usr/bin/tmux new-session -d -t portforwards -c bash
+		else
+			echo "Adding a horizontal split in tmux"
+			/usr/bin/tmux split-window -t portforwards -h bash
+		fi
+
+		echo "  Creating port forward script"
+		cat <<EOF > /tmp/portforward.${targetPort}.sh
+#!/bin/bash
+set -m
+sudo kubectl --namespace ${NAMESPACE} port-forward --address 0.0.0.0  pod/$POD_NAME $targetPort:$CONTAINER_PORT &
+pid=\$!
+jobs -l
+echo \$pid > /tmp/portforward.${targetPort}.pid
+fg %1
+EOF
+		chmod a+x /tmp/portforward.${targetPort}.sh
+
+		echo "  Configuring monit to monitor the port forwarding"
+		cat <<EOF > /etc/monit/conf.d/portforward.${targetPort}
+check process pf.${targetPort} with pidfile /tmp/portforward.${targetPort}.pid
+  start program = "/usr/bin/tmux send -t portforwards:0.$i /tmp/portforward.${targetPort}.sh C-m"
+  stop program = "/usr/bin/sleep 0.1"
+EOF
+		i=$((i+1))
+        done
 }
 
 waitfor_pod_ready() {
-        echo "Waiting for pod app=web-platform-helm to be ready"
+        echo "Waiting for pod $1 to be ready"
         kubectl wait --timeout=2400s --for=condition=ready pod -l $1
 }
 
+install_monit
 if [ "$1" == "kind" ]; then
 	start_kind
 else
 	start_minikube
 fi
 
-setup_cluster_mounts
 check_helm_plugins
 setup_aws_credentials
 create_k8s_secrets
 install_chart
+setup_port_frowards
+sleep 30 # wait for pods to come up?
+start_monit
 setup_cluster_access_proxy
-#setup_port_frowards
-#waitfor_pod_ready app=web-platfom-helm
+#waitfor_pod_ready <label here>
