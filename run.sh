@@ -19,8 +19,12 @@ export K8S_VAR_FILES=demo-chart/values.yaml
 export K8S_CHART_NAME=my-demo-chart
 export K8S_CHART_REFERENCE=./demo-chart/
 
-all_cmounts=()
 KIND_EXE="/root/go/bin/kind"
+
+keep_running="yes"
+
+trap 'keep_running="no"' 2
+
 print_sep() {
         printf '%.s─' $(seq 1 $(tput cols))
         echo
@@ -50,6 +54,19 @@ start_monit() {
 	echo Status:
 	monit
 	monit status
+}
+
+run_and_monitor_program() {
+	processName=$1
+	shift
+	command=$1
+	pidFile=/tmp/${processName}.pid
+	echo "  Configuring monit fo ${processName} with pidfile ${pidFile}"
+	cat <<EOF > /etc/monit/conf.d/${processName}
+check process ${processName} with pidfile /tmp/${processName}.pid
+  start program = "${command}"
+  stop program = "/usr/bin/sleep 0.1"
+EOF
 }
 
 setup_minikube_cluster_mounts() {
@@ -165,7 +182,18 @@ install_chart() {
 
 setup_cluster_access_proxy() {
         print_title "Setting up cluster control proxy to port ${K8S_PROXY_PORT}."
-        kubectl proxy --port ${K8S_PROXY_PORT} --address 0.0.0.0 --accept-hosts=".*"
+	/usr/bin/tmux new-session -d -t k8s_proxy -c bash
+	cat <<EOF > /tmp/setup_k8s_proxy.sh
+#!/bin/bash
+set -m
+kubectl proxy --port ${K8S_PROXY_PORT} --address 0.0.0.0 --accept-hosts=".*" &
+pid=\$!
+jobs -l
+echo \$pid > /tmp/k8s_proxy.pid
+fg %1
+EOF
+	chmod a+x /tmp/setup_k8s_proxy.sh
+        run_and_monitor_program k8s_proxy "/usr/bin/tmux send -t k8s_proxy:0.0 /tmp/setup_k8s_proxy.sh C-m"
 }
 
 setup_port_frowards() {
@@ -199,12 +227,7 @@ fg %1
 EOF
 		chmod a+x /tmp/portforward.${targetPort}.sh
 
-		echo "  Configuring monit to monitor the port forwarding"
-		cat <<EOF > /etc/monit/conf.d/portforward.${targetPort}
-check process pf.${targetPort} with pidfile /tmp/portforward.${targetPort}.pid
-  start program = "/usr/bin/tmux send -t portforwards:0.$i /tmp/portforward.${targetPort}.sh C-m"
-  stop program = "/usr/bin/sleep 0.1"
-EOF
+		run_and_monitor_program portforward.${targetPort} "/usr/bin/tmux send -t portforwards:0.$i /tmp/portforward.${targetPort}.sh C-m"
 		i=$((i+1))
         done
 }
@@ -226,7 +249,28 @@ setup_aws_credentials
 create_k8s_secrets
 install_chart
 setup_port_frowards
+setup_cluster_access_proxy
+
+
 sleep 30 # wait for pods to come up?
 start_monit
-setup_cluster_access_proxy
-#waitfor_pod_ready <label here>
+sleep 5
+while [ "${keep_running}" == "yes" ]; do
+	# main body of your script here
+	sleep 2
+	print_sep
+	monit status
+	print_title "The k8s cluster has started. Please keep this window running."
+	echo "To check on port forwarding, use 'tmux a -t portforwads'."
+	echo "To check on k8s proxy, use 'tmux a -t k8s_proxy'."
+	k8s_proxy_pid=`cat /tmp/k8s_proxy.pid`
+	while [ -e /proc/${k8s_proxy_pid} ]
+	do
+		sleep 2
+		if [ "${keep_running}" != "yes" ]; then
+			break
+		fi
+	done
+done
+monit stop
+kill -9 `cat /tmp/k8s_proxy.pid`
