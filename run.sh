@@ -9,7 +9,7 @@ export AWS_SECRET_ACCESS_KEY=
 export AWS_ECR_SECRET_PREFIX=regcred
 export K8S_PROXY_PORT=16181
 export CLUSTER_MOUNTS= #(<src folder 1>:<dst folder1>,...) /opt/mongodb/data:/mongodb/data
-export CLUSTER_PORT_FORWARDS="app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart:16190 app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart:16191"
+export CLUSTER_PORT_FORWARDS="app.kubernetes.io/name=my-demo-app,app.kubernetes.io/instance=my-demo-chart:16182"
 export KIND_WORKERS=0
 
 
@@ -38,8 +38,6 @@ print_title() {
 
 install_monit() {
 	print_title "Installing monit"
-	sudo apt-get update -y
-	sudo apt install -y monit
 	cat <<EOF > /etc/monit/conf.d/custom.settings
 set daemon 5
 set httpd port 2812 and
